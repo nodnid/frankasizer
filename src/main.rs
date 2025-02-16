@@ -38,14 +38,17 @@ struct WavetableOscillator {
     index: f32,
     index_increment: f32,
     amplitude: f32,
+    voice_amplitude: f32,
     attack: f32,
     decay: f32,
     sustain: f32,
     release: f32,
+    shared: Arc<Mutex<f32>>,
 }
 
+
 impl WavetableOscillator {
-    fn new(sample_rate: u32, wave_table: Vec<f32>) -> WavetableOscillator {
+    fn new(sample_rate: u32, wave_table: Vec<f32>, shared: Arc<Mutex<f32>>) -> WavetableOscillator {
         return WavetableOscillator {
             note_on: true,
             note_on_time: SystemTime::now(),
@@ -55,10 +58,12 @@ impl WavetableOscillator {
             index: 0.0,
             index_increment: 0.0,
             amplitude: 1.0,
+            voice_amplitude: 0.0,
             attack: 0.0,
             decay: 0.0,
             sustain: 0.0,
             release: 0.0,
+            shared: shared,
         }
     }
 
@@ -110,15 +115,20 @@ impl WavetableOscillator {
                     }
                 }
             }
+            self.voice_amplitude = amp;
         }
         else {
             // Release amplitude envelope.
+            amp = self.voice_amplitude;
             if self.release > 0.0 {
                 match self.note_off_time.elapsed() {
                     Ok(elapsed) => {
                         let release_length_ms: u128 = (RELEASE_MS as f32 * self.release) as u128;
                         if elapsed.as_millis() < release_length_ms  {
                             amp *= 1.0 - (elapsed.as_millis() as f32 / release_length_ms as f32);
+                        }
+                        else {
+                            amp = 0.0;
                         }
                     }
                     Err(e) => {
@@ -133,10 +143,17 @@ impl WavetableOscillator {
     }
 
     fn get_sample(&mut self) -> f32 {
+        // Check for shared mutex amplitude, when it reaches 0,
+        // set note off and trigger decay envelope.
+        if self.note_on {
+            if *self.shared.lock().unwrap() == 0.0 {
+                self.set_note_on(false);
+            }
+        }
         let sample = self.lerp_sine();
         self.index += self.index_increment;
         self.index %= self.wave_table.len() as f32;
-        return sample;
+        return self.get_amplitude() * sample;
     }
 
     fn lerp_saw(&self) -> f32 {
@@ -156,7 +173,7 @@ impl WavetableOscillator {
         let next_index_weight = self.index - truncated_index as f32;
         let truncated_index_weight = 1.0 - next_index_weight;
 
-        return self.get_amplitude() * (truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index]);
+        return (truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index]);
     }
 
     fn lerp_square(&self) -> f32 {
@@ -201,6 +218,24 @@ impl Source for WavetableOscillator {
     }
 }
 
+struct WtVoice {
+    shared: Arc<Mutex<f32>>,
+    wt_osc: WavetableOscillator,
+    midi_port: midir::MidiInputPort,
+    frequency: f32,
+    amplitude: f32,
+    note_on: bool,
+    note_on_time: SystemTime,
+    note_off_time: SystemTime,
+
+}
+
+impl WtVoice {
+    fn new(shared: Arc<Mutex<f32>>, midi_port: midir::MidiInputPort, frequency: f32, amplitude: f32) {
+
+    }
+}
+
 fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thread::JoinHandle<()> {
     let note = std::thread::spawn(move ||  {
         let wave_table_size = 64;
@@ -208,18 +243,18 @@ fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thr
         for n in 0..wave_table_size {
             wave_table.push((2.0 * std::f32::consts::PI * n as f32 / wave_table_size as f32).sin());
         }
-        let mut oscillator = WavetableOscillator::new(44100, wave_table);
+        let mut oscillator = WavetableOscillator::new(44100, wave_table, Arc::clone(&shared));
         oscillator.set_frequency(frequency);
         oscillator.set_amplitude(velocity/127.0);
         // Set attack, delay, sustain, release.
         oscillator.set_attack(0.5);
-        oscillator.set_release(1.0);
+        oscillator.set_release(0.5);
 
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
         let _result = stream_handle.play_raw(oscillator.convert_samples());
         while *shared.lock().unwrap() > 0.0 {}
         //oscillator.set_note_on(false);
-        //std::thread::sleep(std::time::Duration::from_millis(RELEASE_MS as u64));
+        std::thread::sleep(std::time::Duration::from_millis(RELEASE_MS as u64));
     });
     return note;
 }
@@ -234,7 +269,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn Error>> {
     let mut input = String::new();
     let mut notes: HashMap<u8, NoteData> = HashMap::with_capacity(16);
-    let voices: [usize; 16] = core::array::from_fn(|i| i+1);
+    //let voices: [usize; 16] = core::array::from_fn(|i| i+1);
 
     let mut midi_in= MidiInput::new("midi_read_fx")?;
     midi_in.ignore(Ignore::None);
@@ -284,7 +319,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         let mut note_shared_vel = note_data.shared.lock().unwrap();
                         *note_shared_vel = 0.0;
                     }
-                    else {
+                    else if message[0] == 0x90 {
                         // Note on w/ velocity.
                         let shared = Arc::new(Mutex::new(1.0));
                         let note = wavetable_main(
