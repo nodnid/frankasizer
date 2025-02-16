@@ -278,7 +278,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 }
                 3 => {
                     // Regular note data.
-                    if message[2] == 0 {
+                    if message[0] == 0x80 || (message[0] == 0x90 && message[2] == 0) {
                         // Note off.
                         let mut note_data = notes.remove(&message[1]).ok_or("No note found!?").unwrap();
                         let mut note_shared_vel = note_data.shared.lock().unwrap();
