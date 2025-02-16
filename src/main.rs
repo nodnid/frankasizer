@@ -136,14 +136,14 @@ fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thr
 
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
         let _result = stream_handle.play_raw(oscillator.convert_samples());
-        let shared_vel = shared.lock().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        /*
-        while *shared_vel > 0.0 {
-            println!("Shared! {}", shared_vel);
-            std::thread::sleep_ms(1);
+        //std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut run_loop: bool = true;
+        while run_loop {
+            let shared_vel = shared.lock().unwrap();
+            println!("Shared! {}", *shared_vel);
+            run_loop = *shared_vel > 0.0;
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        */
     });
     return note;
 }
@@ -213,7 +213,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                         // Note off.
                         //let note_data = notes.get(&message[1]);
                         let mut note_data = notes.remove(&message[1]).ok_or("No note found!?").unwrap();
-                        //note_data.shared = 0.0;
+                        let mut note_shared_vel = note_data.shared.lock().unwrap();
+                        *note_shared_vel = 0.0;
                         println!("note data {:?}", note_data);
                         
                         //notes.remove(&message[1]);
