@@ -122,7 +122,6 @@ impl Source for WavetableOscillator {
     }
 }
 
-//fn wavetable_main(frequency: f32, velocity: f32, tx: std::sync::mpsc::Sender<()>, rx: std::sync::mpsc::Receiver<()>) -> thread::JoinHandle<()> {
 fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thread::JoinHandle<()> {
     let note = std::thread::spawn(move ||  {
         let wave_table_size = 64;
@@ -136,14 +135,8 @@ fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thr
 
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
         let _result = stream_handle.play_raw(oscillator.convert_samples());
-        //std::thread::sleep(std::time::Duration::from_millis(200));
         let mut run_loop: bool = true;
-        while run_loop {
-            let shared_vel = shared.lock().unwrap();
-            println!("Shared! {}", *shared_vel);
-            run_loop = *shared_vel > 0.0;
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        while *shared.lock().unwrap() > 0.0 {}
     });
     return note;
 }
@@ -157,8 +150,6 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut input = String::new();
-    //let mut notes: Vec<std::thread::JoinHandle<()>> = Vec::with_capacity(16);
-    //let mut notes: HashMap<u8, (thread::JoinHandle<()>, Arc<f32>)> = HashMap::with_capacity(16);
     let mut notes: HashMap<u8, NoteData> = HashMap::with_capacity(16);
     let voices: [usize; 16] = core::array::from_fn(|i| i+1);
 
@@ -192,17 +183,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
 
     println!("\nOpening connection");
-    //let in_port_name = midi_in.port_name(in_port)?;
-
-    println!("notes array {:?}", voices);
-
     // Connection needs to be named to be kept alive.
     let _conn_in = midi_in.connect(
         in_port,
         "midir-read-input",
         move |stamp, message, _| {
             println!("{}: {:?} (len = {})", stamp, message, message.len());
-            println!("notes {:?}", notes);
             match message.len() {
                 2 => {
                     // Aftertouch?
@@ -211,14 +197,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                     // Regular note data.
                     if message[2] == 0 {
                         // Note off.
-                        //let note_data = notes.get(&message[1]);
                         let mut note_data = notes.remove(&message[1]).ok_or("No note found!?").unwrap();
                         let mut note_shared_vel = note_data.shared.lock().unwrap();
                         *note_shared_vel = 0.0;
-                        println!("note data {:?}", note_data);
-                        
-                        //notes.remove(&message[1]);
-
                     }
                     else {
                         // Note on w/ velocity.
