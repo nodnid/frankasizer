@@ -1,6 +1,5 @@
 // main.rs
 
-use core::time::Duration;
 use rodio::{OutputStream, source::Source};
 use std::collections::HashMap;
 use std::error::Error;
@@ -8,8 +7,12 @@ use std::io::{stdin, stdout, Write};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, SystemTime};
 use midir::Ignore;
 use midir::MidiInput;
+
+const ATTACK_MS: u128 = 2000;
+const RELEASE_MS: u128 = 2000;
 
 #[derive(Debug)]
 struct NoteData {
@@ -27,22 +30,52 @@ impl NoteData {
 }
 
 struct WavetableOscillator {
+    note_on: bool,
+    note_on_time: SystemTime,
+    note_off_time: SystemTime,
     sample_rate: u32,
     wave_table: Vec<f32>,
     index: f32,
     index_increment: f32,
     amplitude: f32,
+    attack: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32,
 }
 
 impl WavetableOscillator {
     fn new(sample_rate: u32, wave_table: Vec<f32>) -> WavetableOscillator {
         return WavetableOscillator {
+            note_on: true,
+            note_on_time: SystemTime::now(),
+            note_off_time: SystemTime::now(),
             sample_rate: sample_rate,
             wave_table: wave_table,
             index: 0.0,
             index_increment: 0.0,
             amplitude: 1.0,
+            attack: 0.0,
+            decay: 0.0,
+            sustain: 0.0,
+            release: 0.0,
         }
+    }
+
+    fn set_attack(&mut self, attack: f32) {
+        self.attack = attack;
+    }
+
+    fn set_decay(&mut self, decay: f32) {
+        self.decay = decay;
+    }
+
+    fn set_sustain(&mut self, sustain: f32) {
+        self.sustain = sustain;
+    }
+
+    fn set_release(&mut self, release: f32) {
+        self.release = release;
     }
 
     fn set_frequency(&mut self, frequency: f32) {
@@ -51,6 +84,52 @@ impl WavetableOscillator {
 
     fn set_amplitude(&mut self, amplitude: f32) {
         self.amplitude = amplitude;
+    }
+
+    fn set_note_on(&mut self, note_on: bool) {
+        self.note_on = note_on;
+        if !note_on {
+            self.note_off_time = SystemTime::now();
+        }
+    }
+
+    fn get_amplitude(&mut self) -> f32 {
+        let mut amp: f32 = self.amplitude;
+        if self.note_on {
+            // Attack amplitude envelope.
+            if self.attack > 0.0 {
+                match self.note_on_time.elapsed() {
+                    Ok(elapsed) => {
+                        let attack_length_ms: u128 = (ATTACK_MS as f32 * self.attack) as u128;
+                        if elapsed.as_millis() < attack_length_ms  {
+                            amp *= (elapsed.as_millis() as f32 / attack_length_ms as f32);
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error getting amplitude: {:?}", e);
+                    }
+                }
+            }
+        }
+        else {
+            // Release amplitude envelope.
+            if self.release > 0.0 {
+                match self.note_off_time.elapsed() {
+                    Ok(elapsed) => {
+                        let release_length_ms: u128 = (RELEASE_MS as f32 * self.release) as u128;
+                        if elapsed.as_millis() < release_length_ms  {
+                            amp *= 1.0 - (elapsed.as_millis() as f32 / release_length_ms as f32);
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error getting amplitude: {:?}", e);
+                    }
+                }
+            }
+
+        }
+
+        return amp;
     }
 
     fn get_sample(&mut self) -> f32 {
@@ -70,14 +149,14 @@ impl WavetableOscillator {
         return truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index];
     }
 
-    fn lerp_sine(&self) -> f32 {
+    fn lerp_sine(&mut self) -> f32 {
         let truncated_index = self.index as usize;
         let next_index = (truncated_index + 1) % self.wave_table.len();
 
         let next_index_weight = self.index - truncated_index as f32;
         let truncated_index_weight = 1.0 - next_index_weight;
 
-        return self.amplitude * (truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index]);
+        return self.get_amplitude() * (truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index]);
     }
 
     fn lerp_square(&self) -> f32 {
@@ -132,11 +211,15 @@ fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thr
         let mut oscillator = WavetableOscillator::new(44100, wave_table);
         oscillator.set_frequency(frequency);
         oscillator.set_amplitude(velocity/127.0);
+        // Set attack, delay, sustain, release.
+        oscillator.set_attack(0.5);
+        oscillator.set_release(1.0);
 
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
         let _result = stream_handle.play_raw(oscillator.convert_samples());
-        let mut run_loop: bool = true;
         while *shared.lock().unwrap() > 0.0 {}
+        //oscillator.set_note_on(false);
+        //std::thread::sleep(std::time::Duration::from_millis(RELEASE_MS as u64));
     });
     return note;
 }
