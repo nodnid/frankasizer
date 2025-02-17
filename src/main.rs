@@ -269,7 +269,7 @@ fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thr
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
         let _result = stream_handle.play_raw(oscillator.convert_samples());
         while *shared.lock().unwrap() > 0.0 {}
-        //oscillator.set_note_on(false);
+        // Allow thread to live until release is done.
         std::thread::sleep(std::time::Duration::from_millis(RELEASE_MS as u64));
     });
     return note;
@@ -315,6 +315,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .ok_or("invalid input port selected")?
         }
     };
+
+    // Start a quiet wave just to keep the audio driver busy
+    // to prevent crackling.
+    let note = wavetable_main(
+        440.0 * 2_f32.powf(69.0/12.0),
+        0.0,
+        Arc::new(Mutex::new(1.0)),
+    );
 
     println!("\nOpening connection");
     // Connection needs to be named to be kept alive.
