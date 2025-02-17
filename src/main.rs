@@ -14,6 +14,10 @@ use midir::MidiInput;
 const ATTACK_MS: u128 = 2000;
 const RELEASE_MS: u128 = 2000;
 
+const WAVE_TYPE_SINE: u8 = 0;
+const WAVE_TYPE_SAW: u8 = 1;
+const WAVE_TYPE_SQUARE: u8 = 2;
+
 struct NoteData {
     note: std::thread::JoinHandle<()>,
     shared: Arc<Mutex<f32>>
@@ -164,23 +168,13 @@ impl WavetableOscillator {
                 self.set_note_on(false);
             }
         }
-        let sample = self.lerp_sine();
+        let sample = self.lerp();
         self.index += self.index_increment;
         self.index %= self.wave_table.len() as f32;
         return self.get_amplitude() * sample;
     }
 
-    fn lerp_saw(&self) -> f32 {
-        let truncated_index = self.index as usize;
-        let next_index = (truncated_index + 1) % self.wave_table.len();
-
-        let next_index_weight = self.index - truncated_index as f32;
-        let truncated_index_weight = 1.0 - next_index_weight;
-
-        return truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index];
-    }
-
-    fn lerp_sine(&mut self) -> f32 {
+    fn lerp(&mut self) -> f32 {
         let truncated_index = self.index as usize;
         let next_index = (truncated_index + 1) % self.wave_table.len();
 
@@ -188,21 +182,6 @@ impl WavetableOscillator {
         let truncated_index_weight = 1.0 - next_index_weight;
 
         return (truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index]);
-    }
-
-    fn lerp_square(&self) -> f32 {
-        let truncated_index = self.index as usize;
-        let next_index = (truncated_index + 1) % self.wave_table.len();
-
-        let next_index_weight = self.index - truncated_index as f32;
-        let truncated_index_weight = 1.0 - next_index_weight;
-
-        //return truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index];
-        let ret: f32 = truncated_index_weight * self.wave_table[truncated_index] + next_index_weight * self.wave_table[next_index];
-        if ret > 0.0 {
-            return 1.0;
-        }
-        return -1.0;
     }
 }
 
@@ -250,18 +229,61 @@ impl WtVoice {
     }
 }
 
-fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thread::JoinHandle<()> {
-    let note = std::thread::spawn(move ||  {
-        let wave_table_size = 64;
-        let mut wave_table: Vec<f32> = Vec::with_capacity(wave_table_size);
-        for n in 0..wave_table_size {
-            wave_table.push((2.0 * std::f32::consts::PI * n as f32 / wave_table_size as f32).sin());
+fn wavetable_sine() -> Vec<f32> {
+    let wave_table_size = 64;
+    let mut wave_table: Vec<f32> = Vec::with_capacity(wave_table_size);
+    for n in 0..wave_table_size {
+        wave_table.push((2.0 * std::f32::consts::PI * n as f32 / wave_table_size as f32).sin());
+    }
+    println!("Wave table sine {:?}", wave_table);
+    return wave_table;
+}
+
+fn wavetable_saw() -> Vec<f32> {
+    let wave_table_size = 64;
+    let mut wave_table: Vec<f32> = Vec::with_capacity(wave_table_size);
+    for n in 0..wave_table_size {
+        wave_table.push(1.0 - 2.0 * (n as f32 / wave_table_size as f32));
+    }
+    println!("Wave table saw {:?}", wave_table);
+    return wave_table;
+}
+
+fn wavetable_square() -> Vec<f32> {
+    let wave_table_size = 64;
+    let mut wave_table: Vec<f32> = Vec::with_capacity(wave_table_size);
+    for n in 0..wave_table_size {
+        let mut val: f32 = 1.0;
+        if n < wave_table_size / 2 {
+            val = -1.0;
         }
+        wave_table.push(val);
+    }
+    println!("Wave table square {:?}", wave_table);
+    return wave_table;
+}
+
+fn wavetable_main(wave_table_type: u8, frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thread::JoinHandle<()> {
+    let note = std::thread::spawn(move ||  {
+        let wave_table: Vec<f32> = match wave_table_type {
+            WAVE_TYPE_SINE => {
+                wavetable_sine()
+            },
+            WAVE_TYPE_SAW => {
+                wavetable_saw()
+            },
+            WAVE_TYPE_SQUARE => {
+                wavetable_square()
+            }
+            _ =>  {
+                wavetable_sine()
+            }
+        };
         let mut oscillator = WavetableOscillator::new(44100, wave_table, Arc::clone(&shared));
         oscillator.set_frequency(frequency);
         oscillator.set_amplitude(velocity/127.0);
         // Set attack, delay, sustain, release.
-        oscillator.set_attack(600);
+        oscillator.set_attack(10);
         oscillator.set_decay(600);
         oscillator.set_sustain(0.2);
         oscillator.set_release(800);
@@ -284,7 +306,8 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     let mut input = String::new();
-    let mut notes: HashMap<u8, NoteData> = HashMap::with_capacity(16);
+    let mut voice1: HashMap<u8, NoteData> = HashMap::with_capacity(16);
+    let mut voice2: HashMap<u8, NoteData> = HashMap::with_capacity(16);
     //let voices: [usize; 16] = core::array::from_fn(|i| i+1);
 
     let mut midi_in= MidiInput::new("midi_read_fx")?;
@@ -316,13 +339,17 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // Start a quiet wave just to keep the audio driver busy
-    // to prevent crackling.
+    // Start a quiet wave just to kick start the audio subsystem.
+    let note_length = Arc::new(Mutex::new(1.0));
     let note = wavetable_main(
+        WAVE_TYPE_SINE,
         440.0 * 2_f32.powf(69.0/12.0),
         0.0,
-        Arc::new(Mutex::new(1.0)),
+        Arc::clone(&note_length),
     );
+    // End the note.
+    *note_length.lock().unwrap() = 0.0;
+
 
     println!("\nOpening connection");
     // Connection needs to be named to be kept alive.
@@ -339,7 +366,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                     // Regular note data.
                     if message[0] == 0x80 || (message[0] == 0x90 && message[2] == 0) {
                         // Note off.
-                        let mut note_data = notes.remove(&message[1]).ok_or("No note found!?").unwrap();
+                        let mut note_data = voice1.remove(&message[1]).ok_or("No note found!?").unwrap();
+                        let mut note_shared_vel = note_data.shared.lock().unwrap();
+                        *note_shared_vel = 0.0;
+                        let mut note_data = voice2.remove(&message[1]).ok_or("No note found!?").unwrap();
                         let mut note_shared_vel = note_data.shared.lock().unwrap();
                         *note_shared_vel = 0.0;
                     }
@@ -347,11 +377,21 @@ fn run() -> Result<(), Box<dyn Error>> {
                         // Note on w/ velocity.
                         let shared = Arc::new(Mutex::new(1.0));
                         let note = wavetable_main(
+                            WAVE_TYPE_SAW,
                             440.0 * 2_f32.powf((message[1] as f32 - 69.0)/12.0),
                             message[2] as f32,
                             Arc::clone(&shared)
                         );
-                        notes.insert(message[1], NoteData::new(note, shared));
+                        voice1.insert(message[1], NoteData::new(note, shared));
+                        // Second voice sub-octave.
+                        let shared = Arc::new(Mutex::new(1.0));
+                        let note = wavetable_main(
+                            WAVE_TYPE_SQUARE,
+                            440.0 * 2_f32.powf((message[1] as f32 - 69.0 - 12.0)/12.0),
+                            message[2] as f32,
+                            Arc::clone(&shared)
+                        );
+                        voice2.insert(message[1], NoteData::new(note, shared));
                     }
                 }
                 _ => {
