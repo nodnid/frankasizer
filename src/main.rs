@@ -14,7 +14,6 @@ use midir::MidiInput;
 const ATTACK_MS: u128 = 2000;
 const RELEASE_MS: u128 = 2000;
 
-#[derive(Debug)]
 struct NoteData {
     note: std::thread::JoinHandle<()>,
     shared: Arc<Mutex<f32>>
@@ -39,10 +38,10 @@ struct WavetableOscillator {
     index_increment: f32,
     amplitude: f32,
     voice_amplitude: f32,
-    attack: f32,
-    decay: f32,
+    attack: u16,
+    decay: u16,
     sustain: f32,
-    release: f32,
+    release: u16,
     shared: Arc<Mutex<f32>>,
 }
 
@@ -59,19 +58,19 @@ impl WavetableOscillator {
             index_increment: 0.0,
             amplitude: 1.0,
             voice_amplitude: 0.0,
-            attack: 0.0,
-            decay: 0.0,
+            attack: 0,
+            decay: 0,
             sustain: 0.0,
-            release: 0.0,
+            release: 0,
             shared: shared,
         }
     }
 
-    fn set_attack(&mut self, attack: f32) {
+    fn set_attack(&mut self, attack: u16) {
         self.attack = attack;
     }
 
-    fn set_decay(&mut self, decay: f32) {
+    fn set_decay(&mut self, decay: u16) {
         self.decay = decay;
     }
 
@@ -79,7 +78,7 @@ impl WavetableOscillator {
         self.sustain = sustain;
     }
 
-    fn set_release(&mut self, release: f32) {
+    fn set_release(&mut self, release: u16) {
         self.release = release;
     }
 
@@ -101,18 +100,33 @@ impl WavetableOscillator {
     fn get_amplitude(&mut self) -> f32 {
         let mut amp: f32 = self.amplitude;
         if self.note_on {
-            // Attack amplitude envelope.
-            if self.attack > 0.0 {
-                match self.note_on_time.elapsed() {
-                    Ok(elapsed) => {
-                        let attack_length_ms: u128 = (ATTACK_MS as f32 * self.attack) as u128;
-                        if elapsed.as_millis() < attack_length_ms  {
-                            amp *= (elapsed.as_millis() as f32 / attack_length_ms as f32);
+            match self.note_on_time.elapsed() {
+                Ok(elapsed) => {
+                    // Attack amplitude envelope.
+                    if self.attack > 0 {
+                        if elapsed.as_millis() < self.attack as u128  {
+                            amp *= (elapsed.as_millis() as f32 / self.attack as f32);
                         }
                     }
-                    Err(e) => {
-                        println!("Error getting amplitude: {:?}", e);
+                    if elapsed.as_millis() > self.attack as u128  {
+                        // Attack done, start decay and sustain.
+                        if self.decay > 0 {
+                            let elapsed_since_attack = elapsed.as_millis() - self.attack as u128;
+                            if elapsed_since_attack < self.decay as u128  {
+                                amp -= (self.amplitude - self.amplitude * self.sustain) * (elapsed_since_attack as f32 / self.decay as f32);
+                            }
+                            else {
+                                amp *= self.sustain;
+                            }
+                        }
+                        else {
+                            amp *= self.sustain;
+                        }
                     }
+
+                }
+                Err(e) => {
+                    println!("Error getting amplitude: {:?}", e);
                 }
             }
             self.voice_amplitude = amp;
@@ -120,12 +134,12 @@ impl WavetableOscillator {
         else {
             // Release amplitude envelope.
             amp = self.voice_amplitude;
-            if self.release > 0.0 {
+            if self.release > 0 {
                 match self.note_off_time.elapsed() {
                     Ok(elapsed) => {
-                        let release_length_ms: u128 = (RELEASE_MS as f32 * self.release) as u128;
-                        if elapsed.as_millis() < release_length_ms  {
-                            amp *= 1.0 - (elapsed.as_millis() as f32 / release_length_ms as f32);
+                        //let release_length_ms: u128 = (RELEASE_MS as f32 * self.release) as u128;
+                        if elapsed.as_millis() < self.release as u128 {
+                            amp *= 1.0 - (elapsed.as_millis() as f32 / self.release as f32);
                         }
                         else {
                             amp = 0.0;
@@ -247,8 +261,10 @@ fn wavetable_main(frequency: f32, velocity: f32, shared: Arc<Mutex<f32>>) -> thr
         oscillator.set_frequency(frequency);
         oscillator.set_amplitude(velocity/127.0);
         // Set attack, delay, sustain, release.
-        oscillator.set_attack(0.5);
-        oscillator.set_release(0.5);
+        oscillator.set_attack(600);
+        oscillator.set_decay(600);
+        oscillator.set_sustain(0.2);
+        oscillator.set_release(800);
 
         let (_stream, stream_handle) = OutputStream::try_default().unwrap();
         let _result = stream_handle.play_raw(oscillator.convert_samples());
