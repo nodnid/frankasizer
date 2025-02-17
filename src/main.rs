@@ -13,33 +13,46 @@ use midir::MidiInput;
 use eframe::egui;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-const ATTACK_MS: u128 = 2000;
-const RELEASE_MS: u128 = 2000;
+mod constants {
+    // Envelope constants
+    pub const ATTACK_MS: u128 = 2000;
+    pub const RELEASE_MS: u128 = 2000;
+    pub const DEFAULT_ATTACK: u16 = 10;
+    pub const DEFAULT_DECAY: u16 = 600;
+    pub const DEFAULT_SUSTAIN: f32 = 0.2;
+    pub const DEFAULT_RELEASE: u16 = 800;
 
-const WAVE_TYPE_SINE: u8 = 0;
-const WAVE_TYPE_SAW: u8 = 1;
-const WAVE_TYPE_SQUARE: u8 = 2;
+    // Wave type constants
+    pub const WAVE_TYPE_SINE: u8 = 0;
+    pub const WAVE_TYPE_SAW: u8 = 1;
+    pub const WAVE_TYPE_SQUARE: u8 = 2;
 
-const DEFAULT_ATTACK: u16 = 10;
-const DEFAULT_DECAY: u16 = 600;
-const DEFAULT_SUSTAIN: f32 = 0.2;
-const DEFAULT_RELEASE: u16 = 800;
+    // Pitch constants
+    pub const SEMITONE_MIN: i32 = -36; // 3 octaves down
+    pub const SEMITONE_MAX: i32 = 36;  // 3 octaves up
+    pub const CENTS_MIN: f32 = -100.0;
+    pub const CENTS_MAX: f32 = 100.0;
 
-const SEMITONE_MIN: i32 = -36; // 3 octaves down
-const SEMITONE_MAX: i32 = 36;  // 3 octaves up
+    // Volume constants
+    pub const VOLUME_MIN: f32 = 0.0;
+    pub const VOLUME_MAX: f32 = 1.0;
 
-const CENTS_MIN: f32 = -100.0;
-const CENTS_MAX: f32 = 100.0;
+    // Audio constants
+    pub const SAMPLE_RATE: u32 = 48000;
+    pub const ANTI_POP_SAMPLES: usize = 128;
+    pub const WAVETABLE_SIZE: usize = 2048;
 
-const VOLUME_MIN: f32 = 0.0;
-const VOLUME_MAX: f32 = 1.0;
+    // Filter constants
+    pub const FILTER_MODE_LOW: u8 = 0;
+    pub const FILTER_MODE_BAND: u8 = 1;
+    pub const FILTER_MODE_HIGH: u8 = 2;
+    pub const MIN_FREQ: f32 = 20.0;
+    pub const MAX_FREQ: f32 = 20000.0;
+    pub const MIN_RESONANCE: f32 = 0.0;
+    pub const MAX_RESONANCE: f32 = 1.0;
+}
 
-const SAMPLE_RATE: u32 = 48000; // Higher sample rate for better quality
-const ANTI_POP_SAMPLES: usize = 128; // Anti-pop buffer size
-
-const FILTER_MODE_LOW: u8 = 0;
-const FILTER_MODE_BAND: u8 = 1;
-const FILTER_MODE_HIGH: u8 = 2;
+use constants::*;
 
 struct NoteData {
     note: std::thread::JoinHandle<()>,
@@ -280,11 +293,6 @@ impl Source for WavetableOscillator {
         return None;
     }
 }
-
-const MIN_FREQ: f32 = 20.0;
-const MAX_FREQ: f32 = 20000.0;
-const MIN_RESONANCE: f32 = 0.0;
-const MAX_RESONANCE: f32 = 1.0;
 
 struct StateVariableFilter {
     cutoff: f32,
@@ -722,13 +730,44 @@ fn wavetable_square() -> Vec<f32> {
     wave_table
 }
 
+#[derive(Debug)]
+pub enum SynthError {
+    AudioError(String),
+    MidiError(String),
+    ThreadError(String),
+}
+
+impl std::error::Error for SynthError {}
+
+impl std::fmt::Display for SynthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SynthError::AudioError(msg) => write!(f, "Audio error: {}", msg),
+            SynthError::MidiError(msg) => write!(f, "MIDI error: {}", msg),
+            SynthError::ThreadError(msg) => write!(f, "Thread error: {}", msg),
+        }
+    }
+}
+
+impl From<rodio::StreamError> for SynthError {
+    fn from(err: rodio::StreamError) -> Self {
+        SynthError::AudioError(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for SynthError {
+    fn from(err: std::io::Error) -> Self {
+        SynthError::MidiError(err.to_string())
+    }
+}
+
 fn wavetable_main(
     settings: SynthSettings,
     frequency: f32,
     velocity: f32,
     shared: Arc<Mutex<f32>>,
     wave_type: u8,
-) -> thread::JoinHandle<()> {
+) -> Result<thread::JoinHandle<()>, SynthError> {
     let note = std::thread::spawn(move || {
         let wave_table: Vec<f32> = match wave_type {
             WAVE_TYPE_SINE => wavetable_sine(),
@@ -746,21 +785,26 @@ fn wavetable_main(
         oscillator.set_sustain(settings.get_sustain());
         oscillator.set_release(settings.get_release());
         
-        // Apply filter settings
         oscillator.set_filter_cutoff(settings.get_filter_cutoff());
         oscillator.set_filter_resonance(settings.get_filter_resonance());
         oscillator.set_filter_mode(settings.get_filter_mode());
 
-        let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-        let _result = stream_handle.play_raw(oscillator.convert_samples());
-        
-        // Use a shorter sleep interval for better responsiveness
-        while *shared.lock().unwrap() > 0.0 {
-            thread::sleep(Duration::from_micros(100));
+        if let Ok((_stream, stream_handle)) = OutputStream::try_default() {
+            if let Err(e) = stream_handle.play_raw(oscillator.convert_samples()) {
+                eprintln!("Error playing audio: {}", e);
+                return;
+            }
+            
+            while shared.lock().map(|guard| *guard > 0.0).unwrap_or(false) {
+                thread::sleep(Duration::from_micros(100));
+            }
+            thread::sleep(Duration::from_millis(settings.get_release() as u64));
+        } else {
+            eprintln!("Error opening audio stream");
         }
-        thread::sleep(Duration::from_millis(settings.get_release() as u64));
     });
-    note
+
+    Ok(note)
 }
 
 fn main() {
@@ -778,11 +822,63 @@ fn main() {
     .unwrap();
 }
 
+struct VoiceManager {
+    voices: HashMap<u8, NoteData>,
+    settings: VoiceSettings,
+}
+
+impl VoiceManager {
+    fn new(settings: VoiceSettings) -> Self {
+        Self {
+            voices: HashMap::with_capacity(16),
+            settings,
+        }
+    }
+
+    fn note_on(&mut self, note: u8, velocity: f32, synth_settings: &SynthSettings) -> Result<(), SynthError> {
+        if !self.settings.is_enabled() {
+            return Ok(());
+        }
+
+        let shared = Arc::new(Mutex::new(1.0));
+        let frequency = self.calculate_frequency(note);
+        let adjusted_velocity = velocity * self.settings.get_volume();
+
+        let note_handle = wavetable_main(
+            synth_settings.clone(),
+            frequency,
+            adjusted_velocity,
+            Arc::clone(&shared),
+            self.settings.get_wave_type(),
+        )?;
+
+        self.voices.insert(note, NoteData::new(note_handle, shared));
+        Ok(())
+    }
+
+    fn note_off(&mut self, note: u8) {
+        if let Some(note_data) = self.voices.remove(&note) {
+            if let Ok(mut note_shared_vel) = note_data.shared.lock() {
+                *note_shared_vel = 0.0;
+            }
+        }
+    }
+
+    fn calculate_frequency(&self, note: u8) -> f32 {
+        let semitones = self.settings.get_semitones() as f32;
+        let cents = self.settings.get_cents() / 100.0;
+        let total_semitones = semitones + cents;
+        440.0 * 2_f32.powf((note as f32 - 69.0 + total_semitones) / 12.0)
+    }
+}
+
 fn run(settings_receiver: mpsc::Receiver<SynthSettings>) -> Result<(), Box<dyn Error>> {
     let mut input = String::new();
-    let mut voice1: HashMap<u8, NoteData> = HashMap::with_capacity(16);
-    let mut voice2: HashMap<u8, NoteData> = HashMap::with_capacity(16);
-    let mut voice3: HashMap<u8, NoteData> = HashMap::with_capacity(16);
+    let mut voice_managers = vec![
+        VoiceManager::new(SynthSettings::default().voice1),
+        VoiceManager::new(SynthSettings::default().voice2),
+        VoiceManager::new(SynthSettings::default().voice3),
+    ];
 
     let mut midi_in = MidiInput::new("midi_read_fx")?;
     midi_in.ignore(Ignore::None);
@@ -794,14 +890,14 @@ fn run(settings_receiver: mpsc::Receiver<SynthSettings>) -> Result<(), Box<dyn E
         1 => {
             println!(
                 "Choosing the only available input port: {}",
-                midi_in.port_name(&in_ports[0]).unwrap()
+                midi_in.port_name(&in_ports[0])?
             );
             &in_ports[0]
         }
         _ => {
             println!("\nAvailable input ports:");
             for (i, p) in in_ports.iter().enumerate() {
-                println!("{}: {}", i, midi_in.port_name(p).unwrap());
+                println!("{}: {}", i, midi_in.port_name(p)?);
             }
             print!("Please select input port: ");
             stdout().flush()?;
@@ -822,72 +918,30 @@ fn run(settings_receiver: mpsc::Receiver<SynthSettings>) -> Result<(), Box<dyn E
         move |_stamp, message, _| {
             // Update settings if new ones are available
             while let Ok(new_settings) = settings_receiver.try_recv() {
-                current_settings = new_settings;
+                current_settings = new_settings.clone();
+                for (i, manager) in voice_managers.iter_mut().enumerate() {
+                    manager.settings = match i {
+                        0 => current_settings.voice1.clone(),
+                        1 => current_settings.voice2.clone(),
+                        2 => current_settings.voice3.clone(),
+                        _ => unreachable!(),
+                    };
+                }
             }
 
             match message.len() {
                 3 => {
                     if message[0] == 0x80 || (message[0] == 0x90 && message[2] == 0) {
-                        // Note off - process immediately for responsive release
-                        let mut voice_maps = [&mut voice1, &mut voice2, &mut voice3];
-                        for voice_map in voice_maps.iter_mut() {
-                            if let Some(note_data) = voice_map.remove(&message[1]) {
-                                let mut note_shared_vel = note_data.shared.lock().unwrap();
-                                *note_shared_vel = 0.0;
+                        // Note off
+                        for manager in voice_managers.iter_mut() {
+                            manager.note_off(message[1]);
+                        }
+                    } else if message[0] == 0x90 {
+                        // Note on
+                        for manager in voice_managers.iter_mut() {
+                            if let Err(e) = manager.note_on(message[1], message[2] as f32, &current_settings) {
+                                eprintln!("Error starting note: {}", e);
                             }
-                        }
-                    }
-                    else if message[0] == 0x90 {
-                        // Helper function to calculate frequency with cents
-                        let calc_freq = |semitones: i32, cents: f32| -> f32 {
-                            let total_semitones = semitones as f32 + (cents / 100.0);
-                            440.0 * 2_f32.powf((message[1] as f32 - 69.0 + total_semitones)/12.0)
-                        };
-
-                        // Create voices if enabled
-                        if current_settings.voice1.is_enabled() {
-                            let shared = Arc::new(Mutex::new(1.0));
-                            let note = wavetable_main(
-                                current_settings.clone(),
-                                calc_freq(
-                                    current_settings.voice1.get_semitones(),
-                                    current_settings.voice1.get_cents()
-                                ),
-                                message[2] as f32 * current_settings.voice1.get_volume(),
-                                Arc::clone(&shared),
-                                current_settings.voice1.get_wave_type()
-                            );
-                            voice1.insert(message[1], NoteData::new(note, shared));
-                        }
-
-                        if current_settings.voice2.is_enabled() {
-                            let shared = Arc::new(Mutex::new(1.0));
-                            let note = wavetable_main(
-                                current_settings.clone(),
-                                calc_freq(
-                                    current_settings.voice2.get_semitones(),
-                                    current_settings.voice2.get_cents()
-                                ),
-                                message[2] as f32 * current_settings.voice2.get_volume(),
-                                Arc::clone(&shared),
-                                current_settings.voice2.get_wave_type()
-                            );
-                            voice2.insert(message[1], NoteData::new(note, shared));
-                        }
-
-                        if current_settings.voice3.is_enabled() {
-                            let shared = Arc::new(Mutex::new(1.0));
-                            let note = wavetable_main(
-                                current_settings.clone(),
-                                calc_freq(
-                                    current_settings.voice3.get_semitones(),
-                                    current_settings.voice3.get_cents()
-                                ),
-                                message[2] as f32 * current_settings.voice3.get_volume(),
-                                Arc::clone(&shared),
-                                current_settings.voice3.get_wave_type()
-                            );
-                            voice3.insert(message[1], NoteData::new(note, shared));
                         }
                     }
                 }
